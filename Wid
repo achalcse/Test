@@ -1,0 +1,181 @@
+
+import android.app.KeyguardManager
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.pm.LauncherApps
+import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
+import android.os.Build
+import android.os.Bundle
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.Button
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+
+class MainActivity : AppCompatActivity() {
+    private lateinit var appWidgetHost: AppWidgetHost
+    private lateinit var appWidgetManager: AppWidgetManager
+    private lateinit var launcherApps: LauncherApps
+    private lateinit var widgetRecyclerView: RecyclerView
+
+    companion object {
+        const val APPWIDGET_HOST_ID = 1024
+        const val REQUEST_PICK_WIDGET = 1001
+        const val REQUEST_CONFIGURE_WIDGET = 1002
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+            val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+            km.requestDismissKeyguard(this, null)
+        } else {
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
+
+        appWidgetHost = AppWidgetHost(this, APPWIDGET_HOST_ID)
+        appWidgetManager = AppWidgetManager.getInstance(this)
+        launcherApps = getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val addWidgetButton = Button(this).apply {
+            text = "Add Widget"
+            setOnClickListener { launchWidgetPicker() }
+        }
+
+        widgetRecyclerView = RecyclerView(this).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+        }
+
+        rootLayout.addView(addWidgetButton)
+        rootLayout.addView(widgetRecyclerView)
+
+        setContentView(rootLayout)
+
+        loadAvailableWidgets()
+    }
+
+    private fun launchWidgetPicker() {
+        val widgetId = appWidgetHost.allocateAppWidgetId()
+        val pickIntent = Intent(AppWidgetManager.ACTION_APPWIDGET_PICK).apply {
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
+        }
+        startActivityForResult(pickIntent, REQUEST_PICK_WIDGET)
+    }
+
+    private fun loadAvailableWidgets() {
+        val widgets = launcherApps.getAllWidgets()
+        val adapter = WidgetAdapter(widgets.map { info ->
+            val preview = info.previewImage ?: 0
+            val minWidth = info.providerInfo.minWidth
+            val minHeight = info.providerInfo.minHeight
+            val label = info.label.toString()
+            val component = info.providerInfo.provider
+            val pkg = component.packageName
+            val cn = ComponentName(pkg, component.className)
+            val drawable = try {
+                packageManager.getApplicationIcon(pkg)
+            } catch (e: Exception) { null }
+            WidgetItem(label, drawable, minWidth, minHeight, cn)
+        })
+        widgetRecyclerView.adapter = adapter
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if ((requestCode == REQUEST_PICK_WIDGET || requestCode == REQUEST_CONFIGURE_WIDGET) && resultCode == RESULT_OK) {
+            val widgetId = data?.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1) ?: return
+            val widgetInfo = appWidgetManager.getAppWidgetInfo(widgetId)
+            if (widgetInfo.configure != null && requestCode == REQUEST_PICK_WIDGET) {
+                val intent = Intent(AppWidgetManager.ACTION_APPWIDGET_CONFIGURE).apply {
+                    component = widgetInfo.configure
+                    putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
+                }
+                startActivityForResult(intent, REQUEST_CONFIGURE_WIDGET)
+            } else {
+                val hostView = appWidgetHost.createView(this, widgetId, widgetInfo)
+                hostView.setAppWidget(widgetId, widgetInfo)
+                widgetRecyclerView.addView(hostView)
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        appWidgetHost.startListening()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        appWidgetHost.stopListening()
+    }
+}
+
+data class WidgetItem(
+    val label: String,
+    val icon: Drawable?,
+    val minWidth: Int,
+    val minHeight: Int,
+    val componentName: ComponentName
+)
+
+class WidgetAdapter(private val widgets: List<WidgetItem>) : RecyclerView.Adapter<WidgetAdapter.WidgetViewHolder>() {
+    class WidgetViewHolder(val layout: LinearLayout) : RecyclerView.ViewHolder(layout)
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): WidgetViewHolder {
+        val layout = LinearLayout(parent.context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            val icon = ImageView(parent.context).apply {
+                layoutParams = LinearLayout.LayoutParams(100, 100)
+                id = 1
+            }
+            val label = TextView(parent.context).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                id = 2
+            }
+            addView(icon)
+            addView(label)
+        }
+        return WidgetViewHolder(layout)
+    }
+
+    override fun onBindViewHolder(holder: WidgetViewHolder, position: Int) {
+        val item = widgets[position]
+        val icon = holder.layout.findViewById<ImageView>(1)
+        val label = holder.layout.findViewById<TextView>(2)
+        icon.setImageDrawable(item.icon)
+        label.text = "${item.label} (${item.minWidth}x${item.minHeight})"
+    }
+
+    override fun getItemCount(): Int = widgets.size
+}
