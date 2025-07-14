@@ -1,0 +1,339 @@
+package com.example.hostview
+
+import android.app.Activity
+import android.app.admin.DevicePolicyManager
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetHostView
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Bundle
+import android.view.View
+import android.view.WindowManager
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+
+class MainActivity : Activity() {
+    private lateinit var appWidgetManager: AppWidgetManager
+    private lateinit var appWidgetHost: AppWidgetHost
+    private lateinit var widgetContainer: LinearLayout
+    private var hostId = 1234
+    private  val REQUEST_BIND_WIDGET = 1001
+
+
+    private val chargingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_POWER_CONNECTED -> {
+                    showOnLockScreen()
+
+//                    companion object {
+//                    }
+                }
+                Intent.ACTION_POWER_DISCONNECTED -> {
+                    hideFromLockScreen()
+                }
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Set up lock screen display capability
+        setupLockScreenDisplay()
+
+        // Create main layout
+        val mainLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16, 16, 16, 16)
+        }
+
+        // Title
+        val titleText = TextView(this).apply {
+            text = "Akshaya Widgets"
+            textSize = 24f
+            setPadding(0, 0, 0, 32)
+        }
+        mainLayout.addView(titleText)
+
+        // Scrollable container for widgets
+        val scrollView = ScrollView(this)
+        widgetContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scrollView.addView(widgetContainer)
+        mainLayout.addView(scrollView)
+
+        setContentView(mainLayout)
+
+        // Initialize widget components
+        initializeWidgetHost()
+
+        // Register charging receiver
+        registerChargingReceiver()
+
+        // Load all available widgets
+        loadAllWidgets()
+    }
+
+    private fun setupLockScreenDisplay() {
+        // Allow activity to show on lock screen
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
+    }
+
+    private fun initializeWidgetHost() {
+        appWidgetManager = AppWidgetManager.getInstance(this)
+        appWidgetHost = AppWidgetHost(this, hostId)
+        appWidgetHost.startListening()
+    }
+
+    private fun registerChargingReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        registerReceiver(chargingReceiver, filter)
+    }
+
+    private fun loadAllWidgets() {
+        // Clear existing widgets first
+        widgetContainer.removeAllViews()
+
+        val installedProviders = appWidgetManager.installedProviders
+
+        // Add debug info
+        val debugText = TextView(this).apply {
+            text = "Found ${installedProviders.size} widget providers"
+            textSize = 16f
+            setPadding(0, 16, 0, 16)
+            setTextColor(0xFF666666.toInt())
+        }
+        widgetContainer.addView(debugText)
+
+        if (installedProviders.isEmpty()) {
+            val noWidgetsText = TextView(this).apply {
+                text = "No widgets available on this device"
+                setPadding(0, 32, 0, 32)
+            }
+            widgetContainer.addView(noWidgetsText)
+            return
+        }
+
+        // Sort providers by label for better organization
+        val sortedProviders = installedProviders.sortedBy { it.label }
+
+        for (provider in sortedProviders) {
+            addWidgetToContainer(provider)
+        }
+
+        // Add refresh button
+        val refreshButton = TextView(this).apply {
+            text = "🔄 Refresh Widget List"
+            textSize = 16f
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(0xFF2196F3.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            setOnClickListener { loadAllWidgets() }
+        }
+        widgetContainer.addView(refreshButton)
+    }
+
+    private fun addWidgetToContainer(provider: AppWidgetProviderInfo) {
+        try {
+            // Create widget section with background
+            val widgetSection = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(16, 16, 16, 16)
+                setBackgroundColor(0xFFF5F5F5.toInt())
+            }
+
+            // Widget info header
+            val widgetHeader = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, 0, 0, 8)
+            }
+
+            // Widget name and package info
+            val widgetInfo = TextView(this).apply {
+//                text = "${provider.label}\n${provider.provider.packageName}"
+                textSize = 16f
+                setPadding(0, 0, 0, 8)
+                setTextColor(0xFF333333.toInt())
+            }
+            widgetHeader.addView(widgetInfo)
+            widgetSection.addView(widgetHeader)
+
+            // Widget dimensions info
+            val dimensionsText = TextView(this).apply {
+                text = "Size: ${provider.minWidth}x${provider.minHeight} dp"
+                textSize = 12f
+                setPadding(0, 0, 0, 8)
+                setTextColor(0xFF666666.toInt())
+            }
+            widgetSection.addView(dimensionsText)
+
+            // Allocate widget ID
+            val widgetId = appWidgetHost.allocateAppWidgetId()
+
+            // Try to bind widget
+            val bindResult = try {
+                appWidgetManager.bindAppWidgetIdIfAllowed(widgetId, provider.provider)
+            } catch (e: Exception) {
+                false
+            }
+
+            if (bindResult) {
+                try {
+                    // Create widget host view
+                    val hostView = appWidgetHost.createView(this, widgetId, provider)
+
+                    // Calculate appropriate dimensions
+                    val displayMetrics = resources.displayMetrics
+                    val screenWidth = displayMetrics.widthPixels
+                    val maxWidth = (screenWidth * 0.9).toInt()
+
+                    val widgetWidth = when {
+                        provider.minWidth > 0 -> minOf(provider.minWidth, maxWidth)
+                        else -> LinearLayout.LayoutParams.MATCH_PARENT
+                    }
+
+                    val widgetHeight = when {
+                        provider.minHeight > 0 -> provider.minHeight
+                        else -> 200 // Default height
+                    }
+
+                    hostView.layoutParams = LinearLayout.LayoutParams(widgetWidth, widgetHeight)
+                    hostView.setPadding(8, 8, 8, 8)
+
+                    widgetSection.addView(hostView)
+
+                    // Add success indicator
+                    val successText = TextView(this).apply {
+                        text = "✅ Widget loaded successfully"
+                        textSize = 12f
+                        setPadding(0, 8, 0, 0)
+                        setTextColor(0xFF4CAF50.toInt())
+                    }
+                    widgetSection.addView(successText)
+
+                } catch (e: Exception) {
+                    val errorText = TextView(this).apply {
+                        text = "❌ Error creating widget view: ${e.message}"
+                        textSize = 12f
+                        setPadding(0, 8, 0, 0)
+                        setTextColor(0xFFFF5722.toInt())
+                    }
+                    widgetSection.addView(errorText)
+                }
+            } else {
+                // Widget requires permission or configuration
+                val permissionText = TextView(this).apply {
+                    text = "⚠️ Widget requires permission - Tap to grant"
+                    textSize = 14f
+                    setPadding(0, 8, 0, 8)
+                    setTextColor(0xFFFF9800.toInt())
+                    setBackgroundColor(0xFFFFE0B2.toInt())
+                }
+                widgetSection.addView(permissionText)
+
+                // Add click listener to request permission
+                widgetSection.setOnClickListener {
+                    requestWidgetPermission(widgetId, provider)
+                }
+            }
+
+            // Add spacing
+            val spacer = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 16
+                )
+            }
+            widgetSection.addView(spacer)
+
+            widgetContainer.addView(widgetSection)
+
+        } catch (e: Exception) {
+            val errorSection = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(16, 16, 16, 16)
+                setBackgroundColor(0xFFFFEBEE.toInt())
+            }
+
+            val errorText = TextView(this).apply {
+                text = "❌ Failed to load widget: ${provider.label}\nError: ${e.message}"
+                textSize = 14f
+                setTextColor(0xFFD32F2F.toInt())
+            }
+            errorSection.addView(errorText)
+            widgetContainer.addView(errorSection)
+        }
+    }
+
+    private fun requestWidgetPermission(widgetId: Int, provider: AppWidgetProviderInfo) {
+        val intent = Intent(AppWidgetManager.ACTION_APPWIDGET_BIND).apply {
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId)
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, provider.provider)
+        }
+        startActivityForResult(intent, REQUEST_BIND_WIDGET)
+    }
+
+    private fun showOnLockScreen() {
+        // Additional flags for lock screen display
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        )
+
+        // Bring activity to front
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        }
+        startActivity(intent)
+    }
+
+    private fun hideFromLockScreen() {
+        // Remove lock screen flags
+        window.clearFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        )
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == REQUEST_BIND_WIDGET) {
+            if (resultCode == RESULT_OK) {
+                // Widget permission granted, reload widgets
+                widgetContainer.removeAllViews()
+                loadAllWidgets()
+                Toast.makeText(this, "Widget permission granted", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Widget permission denied", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Refresh widget list when activity resumes
+        loadAllWidgets()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        appWidgetHost.stopListening()
+        unregisterReceiver(chargingReceiver)
+    }
+}
