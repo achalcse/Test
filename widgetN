@@ -1,0 +1,326 @@
+package com.example.mynewwidget
+
+import android.app.Activity
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.content.BroadcastReceiver
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Bundle
+import android.util.DisplayMetrics
+import android.util.Log
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.*
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.bottomsheet.BottomSheetDialog
+
+class MainActivity : Activity() {
+    private lateinit var appWidgetManager: AppWidgetManager
+    private lateinit var appWidgetHost: AppWidgetHost
+    private lateinit var addedWidgetContainer: LinearLayout
+
+    private val hostId = 1234
+    private val REQUEST_BIND_WIDGET = 1001
+    private val allocatedPreviewIds = mutableListOf<Int>()
+
+    private val PREFS_NAME = "WidgetPrefs"
+    private val PREF_WIDGET_IDS = "widget_ids"
+
+    private val chargingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_POWER_CONNECTED -> showOnLockScreen()
+                Intent.ACTION_POWER_DISCONNECTED -> hideFromLockScreen()
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setupLockScreenDisplay()
+        initializeWidgetHost()
+        setupUI()
+        registerChargingReceiver()
+        restoreWidgetsFromPrefs()
+    }
+
+    private fun setupLockScreenDisplay() {
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
+    }
+
+    private fun initializeWidgetHost() {
+        appWidgetManager = AppWidgetManager.getInstance(this)
+        appWidgetHost = AppWidgetHost(this, hostId)
+        appWidgetHost.startListening()
+    }
+
+    private fun setupUI() {
+        val mainLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16, 16, 16, 16)
+        }
+
+        val titleText = TextView(this).apply {
+            text = "My Widget Host"
+            textSize = 24f
+            setPadding(0, 0, 0, 32)
+        }
+        mainLayout.addView(titleText)
+
+        addedWidgetContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        mainLayout.addView(addedWidgetContainer)
+
+        val addWidgetButton = TextView(this).apply {
+            text = "\u2795 Add Widget"
+            textSize = 16f
+            setPadding(32, 16, 32, 16)
+            setBackgroundColor(0xFF3F51B5.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            setOnClickListener { showWidgetPickerBottomSheet() }
+        }
+        mainLayout.addView(addWidgetButton)
+
+        setContentView(mainLayout)
+    }
+
+    private fun registerChargingReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        registerReceiver(chargingReceiver, filter)
+    }
+
+    private fun showWidgetPickerBottomSheet() {
+        val bottomSheet = BottomSheetDialog(this)
+        val recyclerView = RecyclerView(this).apply {
+            layoutManager = GridLayoutManager(context, 2)
+        }
+
+        val providers = appWidgetManager.installedProviders
+        val adapter = WidgetPickerAdapter(providers, this, appWidgetHost, appWidgetManager) { provider, widgetId ->
+            addWidgetToActivity(provider, widgetId)
+            bottomSheet.dismiss()
+        }
+
+        recyclerView.adapter = adapter
+
+        bottomSheet.setContentView(recyclerView)
+        bottomSheet.setOnDismissListener {
+            adapter.cleanup()
+        }
+        bottomSheet.show()
+    }
+
+    private fun calculateSquareSize(): Int {
+        val metrics: DisplayMetrics = resources.displayMetrics
+        return (metrics.widthPixels * 0.6).toInt()
+    }
+
+    private fun addWidgetToActivity(provider: AppWidgetProviderInfo, widgetId: Int) {
+        try {
+            val hostView = appWidgetHost.createView(this, widgetId, provider).apply {
+                setAppWidget(widgetId, provider)
+                layoutParams = LinearLayout.LayoutParams(calculateSquareSize(), calculateSquareSize())
+                setOnTouchListener(resizeTouchListener(widgetId, provider))
+            }
+            addedWidgetContainer.addView(hostView)
+            saveWidgetToPrefs(widgetId, provider.provider)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Failed to add widget: ${e.message}", Toast.LENGTH_SHORT).show()
+            Log.e("WidgetHost", "addWidgetToActivity failed", e)
+        }
+    }
+
+    private fun resizeTouchListener(widgetId: Int, provider: AppWidgetProviderInfo): View.OnTouchListener {
+        return View.OnTouchListener { v, event ->
+            if (event.action == MotionEvent.ACTION_UP) {
+                val size = calculateSquareSize()
+                appWidgetManager.updateAppWidgetOptions(widgetId, Bundle().apply {
+                    putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, size)
+                    putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, size)
+                    putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, size)
+                    putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, size)
+                })
+                v.layoutParams = LinearLayout.LayoutParams(size, size)
+            }
+            false
+        }
+    }
+
+    private fun saveWidgetToPrefs(widgetId: Int, provider: ComponentName) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val list = prefs.getStringSet(PREF_WIDGET_IDS, mutableSetOf())!!.toMutableSet()
+        list.add("$widgetId:${provider.flattenToString()}")
+        prefs.edit().putStringSet(PREF_WIDGET_IDS, list).apply()
+    }
+
+    private fun restoreWidgetsFromPrefs() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val list = prefs.getStringSet(PREF_WIDGET_IDS, emptySet()) ?: emptySet()
+        list.forEach { entry ->
+            val parts = entry.split(":")
+            if (parts.size == 2) {
+                val widgetId = parts[0].toIntOrNull() ?: return@forEach
+                val provider = ComponentName.unflattenFromString(parts[1]) ?: return@forEach
+                val info = appWidgetManager.getAppWidgetInfo(widgetId) ?: return@forEach
+                addWidgetToActivity(info, widgetId)
+            }
+        }
+    }
+
+    private fun showOnLockScreen() {
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        )
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        }
+        startActivity(intent)
+    }
+
+    private fun hideFromLockScreen() {
+        window.clearFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        )
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_BIND_WIDGET) {
+            if (resultCode == RESULT_OK) {
+                Toast.makeText(this, "Widget permission granted", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Widget permission denied", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        appWidgetHost.stopListening()
+        unregisterReceiver(chargingReceiver)
+    }
+}
+
+
+
+
+
+
+package com.example.mynewwidget
+
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.content.Context
+import android.util.Log
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.recyclerview.widget.RecyclerView
+
+class WidgetPickerAdapter(
+    private val providers: List<AppWidgetProviderInfo>,
+    private val context: Context,
+    private val host: AppWidgetHost,
+    private val manager: AppWidgetManager,
+    private val onWidgetSelected: (AppWidgetProviderInfo, Int) -> Unit
+) : RecyclerView.Adapter<WidgetPickerAdapter.WidgetViewHolder>() {
+
+    private val allocatedWidgetIds = mutableListOf<Int>()
+
+    inner class WidgetViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val container: LinearLayout = view.findViewById(R.id.item_container)
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): WidgetViewHolder {
+        val view = LayoutInflater.from(parent.context).inflate(R.layout.item_widget_picker, parent, false)
+        return WidgetViewHolder(view)
+    }
+
+    override fun onBindViewHolder(holder: WidgetViewHolder, position: Int) {
+        val provider = providers[position]
+        val widgetId = host.allocateAppWidgetId()
+        allocatedWidgetIds.add(widgetId)
+
+        val bound = try {
+            manager.bindAppWidgetIdIfAllowed(widgetId, provider.provider)
+        } catch (e: Exception) {
+            false
+        }
+
+        holder.container.removeAllViews()
+
+        if (bound) {
+            try {
+                val hostView = host.createView(context, widgetId, provider).apply {
+                    setAppWidget(widgetId, provider)
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dpToPx(140)
+                    )
+                }
+                val label = TextView(context).apply {
+                    text = provider.label
+                    setPadding(0, 8, 0, 8)
+                    textAlignment = TextView.TEXT_ALIGNMENT_CENTER
+                }
+
+                holder.container.addView(label)
+                holder.container.addView(hostView)
+
+                holder.container.setOnClickListener {
+                    onWidgetSelected(provider, widgetId)
+                }
+
+            } catch (e: Exception) {
+                Log.e("WidgetPickerAdapter", "Failed to render widget preview", e)
+            }
+        }
+    }
+
+    override fun getItemCount(): Int = providers.size
+
+    fun cleanup() {
+        allocatedWidgetIds.forEach {
+            try {
+                host.deleteAppWidgetId(it)
+            } catch (_: Exception) {}
+        }
+        allocatedWidgetIds.clear()
+    }
+
+    private fun dpToPx(dp: Int): Int {
+        val density = context.resources.displayMetrics.density
+        return (dp * density).toInt()
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
