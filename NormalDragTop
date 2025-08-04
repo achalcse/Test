@@ -1,0 +1,185 @@
+package com.example.mynewwidget
+import android.app.Activity
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.util.DisplayMetrics
+import android.util.Log
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.*
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.bottomsheet.BottomSheetDialog
+
+class MainActivity : Activity() {
+    private lateinit var appWidgetManager: AppWidgetManager
+    private lateinit var appWidgetHost: AppWidgetHost
+    private lateinit var addedWidgetContainer: FrameLayout
+
+    private val hostId = 1234
+    private val REQUEST_BIND_WIDGET = 1001
+    private val allocatedPreviewIds = mutableListOf<Int>()
+
+    private val PREFS_NAME = "WidgetPrefs"
+    private val PREF_WIDGET_IDS = "widget_ids"
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        initializeWidgetHost()
+        setupUI()
+        restoreWidgetsFromPrefs()
+    }
+
+    private fun initializeWidgetHost() {
+        appWidgetManager = AppWidgetManager.getInstance(this)
+        appWidgetHost = AppWidgetHost(this, hostId)
+        appWidgetHost.startListening()
+    }
+
+    private fun setupUI() {
+        val mainLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16, 16, 16, 16)
+        }
+
+        val titleText = TextView(this).apply {
+            text = "My Widget Host"
+            textSize = 24f
+            setPadding(0, 0, 0, 32)
+        }
+        mainLayout.addView(titleText)
+
+        addedWidgetContainer = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        mainLayout.addView(addedWidgetContainer, LinearLayout.LayoutParams.MATCH_PARENT, 800)
+
+        val addWidgetButton = TextView(this).apply {
+            text = "\u2795 Add Widget"
+            textSize = 16f
+            setPadding(32, 16, 32, 16)
+            setBackgroundColor(0xFF3F51B5.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            setOnClickListener { showWidgetPickerBottomSheet() }
+        }
+        mainLayout.addView(addWidgetButton)
+
+        setContentView(mainLayout)
+    }
+
+    private fun showWidgetPickerBottomSheet() {
+        val bottomSheet = BottomSheetDialog(this)
+        val recyclerView = RecyclerView(this).apply {
+            layoutManager = GridLayoutManager(context, 2)
+        }
+
+        val providers = appWidgetManager.installedProviders
+        val adapter = WidgetPickerAdapter(providers, this, appWidgetHost, appWidgetManager) { provider, widgetId ->
+            addWidgetToActivity(provider, widgetId)
+            bottomSheet.dismiss()
+        }
+
+        recyclerView.adapter = adapter
+
+        bottomSheet.setContentView(recyclerView)
+        bottomSheet.setOnDismissListener {
+            adapter.cleanup()
+        }
+        bottomSheet.show()
+    }
+
+    private fun calculateSquareSize(): Int {
+        val metrics: DisplayMetrics = resources.displayMetrics
+        return (metrics.widthPixels * 0.6).toInt()
+    }
+
+    private fun addWidgetToActivity(provider: AppWidgetProviderInfo, widgetId: Int) {
+        try {
+            val size = calculateSquareSize()
+            val hostView = appWidgetHost.createView(this, widgetId, provider).apply {
+                setAppWidget(widgetId, provider)
+                layoutParams = FrameLayout.LayoutParams(size, size)
+                setOnTouchListener(dragResizeTouchListener(this, widgetId, provider))
+            }
+            addedWidgetContainer.addView(hostView)
+            saveWidgetToPrefs(widgetId, provider.provider)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Failed to add widget: ${e.message}", Toast.LENGTH_SHORT).show()
+            Log.e("WidgetHost", "addWidgetToActivity failed", e)
+        }
+    }
+
+    private fun dragResizeTouchListener(view: View, widgetId: Int, provider: AppWidgetProviderInfo): View.OnTouchListener {
+        var dX = 0f
+        var dY = 0f
+        return View.OnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    dX = v.x - event.rawX
+                    dY = v.y - event.rawY
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    v.animate().x(event.rawX + dX).y(event.rawY + dY).setDuration(0).start()
+                }
+                MotionEvent.ACTION_UP -> {
+                    val width = v.width
+                    val height = v.height
+                    appWidgetManager.updateAppWidgetOptions(widgetId, Bundle().apply {
+                        putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, width)
+                        putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, width)
+                        putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, height)
+                        putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, height)
+                    })
+                    v.layoutParams = FrameLayout.LayoutParams(width, height)
+                }
+            }
+            true
+        }
+    }
+
+    private fun saveWidgetToPrefs(widgetId: Int, provider: ComponentName) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val list = prefs.getStringSet(PREF_WIDGET_IDS, mutableSetOf())!!.toMutableSet()
+        list.add("$widgetId:${provider.flattenToString()}")
+        prefs.edit().putStringSet(PREF_WIDGET_IDS, list).apply()
+    }
+
+    private fun restoreWidgetsFromPrefs() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val list = prefs.getStringSet(PREF_WIDGET_IDS, emptySet()) ?: emptySet()
+        list.forEach { entry ->
+            val parts = entry.split(":")
+            if (parts.size == 2) {
+                val widgetId = parts[0].toIntOrNull() ?: return@forEach
+                val provider = ComponentName.unflattenFromString(parts[1]) ?: return@forEach
+                val info = appWidgetManager.getAppWidgetInfo(widgetId) ?: return@forEach
+                addWidgetToActivity(info, widgetId)
+            }
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_BIND_WIDGET) {
+            if (resultCode == RESULT_OK) {
+                Toast.makeText(this, "Widget permission granted", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Widget permission denied", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        appWidgetHost.stopListening()
+    }
+}
