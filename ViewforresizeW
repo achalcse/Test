@@ -355,3 +355,7 @@ item_widget_picker.xml
 </LinearLayout>
 
 
+
+    <uses-permission android:name="android.permission.BIND_APPWIDGET" tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
