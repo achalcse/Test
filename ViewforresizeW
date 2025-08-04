@@ -1,0 +1,357 @@
+package com.example.mynewwidget
+
+import android.app.Activity
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.util.DisplayMetrics
+import android.util.Log
+import android.view.*
+import android.widget.*
+import org.json.JSONArray
+import org.json.JSONObject
+
+class MainActivity : Activity() {
+
+    private lateinit var appWidgetManager: AppWidgetManager
+    private lateinit var appWidgetHost: AppWidgetHost
+    private lateinit var addedWidgetContainer: FrameLayout
+
+    private val hostId = 1234
+    private val PREFS_NAME = "WidgetPrefs"
+    private val PREF_WIDGET_POSITIONS = "widget_positions"
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        appWidgetManager = AppWidgetManager.getInstance(this)
+        appWidgetHost = AppWidgetHost(this, hostId)
+        appWidgetHost.startListening()
+
+        val rootLayout = FrameLayout(this)
+        addedWidgetContainer = FrameLayout(this)
+        rootLayout.addView(addedWidgetContainer)
+
+        val addButton = TextView(this).apply {
+            text = "➕ Add Widget"
+            setPadding(30, 20, 30, 20)
+            setBackgroundColor(0xFF3F51B5.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            setOnClickListener { showAppWidgetPick() }
+        }
+        val params = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            gravity = Gravity.TOP or Gravity.END
+            setMargins(30,0,0,0)
+        }
+        rootLayout.addView(addButton, params)
+
+        setContentView(rootLayout)
+
+        addedWidgetContainer.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                addedWidgetContainer.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                restoreWidgetsFromPrefs()
+            }
+        })
+    }
+
+    private fun showAppWidgetPick() {
+        val intent = Intent(AppWidgetManager.ACTION_APPWIDGET_PICK)
+        val appWidgetId = appWidgetHost.allocateAppWidgetId()
+        intent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
+        startActivityForResult(intent, 100)
+    }
+
+    private fun calculateSquareSize(): Int {
+        val metrics: DisplayMetrics = resources.displayMetrics
+        return (metrics.widthPixels * 0.4).toInt()
+    }
+
+    private fun addWidgetToActivity(provider: AppWidgetProviderInfo, widgetId: Int, x: Int = 100, y: Int = 100, w: Int = calculateSquareSize(), h: Int = calculateSquareSize()) {
+        try {
+            val hostView = appWidgetHost.createView(this, widgetId, provider).apply {
+                setAppWidget(widgetId, provider)
+                layoutParams = FrameLayout.LayoutParams(w, h)
+            }
+
+            val resizeHandle = ImageView(this).apply {
+                setImageResource(android.R.drawable.ic_menu_crop)
+                layoutParams = FrameLayout.LayoutParams(60, 60, Gravity.BOTTOM or Gravity.END)
+                setPadding(8, 8, 8, 8)
+                setBackgroundColor(0x88000000.toInt())
+                setOnTouchListener(resizeTouchListener(hostView, widgetId, provider))
+            }
+
+            val wrapper = FrameLayout(this).apply {
+                layoutParams = FrameLayout.LayoutParams(w, h).apply {
+                    leftMargin = x
+                    topMargin = y
+                }
+                addView(hostView)
+                addView(resizeHandle)
+                setOnTouchListener(moveTouchListener(this, widgetId, provider))
+            }
+
+            addedWidgetContainer.addView(wrapper)
+            saveWidgetToPrefs(widgetId, provider.provider, x, y, w, h)
+            Toast.makeText(this, "⬅️ Drag to move\n↘️ Resize from corner", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Failed to add widget: ${e.message}", Toast.LENGTH_SHORT).show()
+            Log.e("WidgetHost", "addWidgetToActivity failed", e)
+        }
+    }
+
+    private fun moveTouchListener(target: View, widgetId: Int, provider: AppWidgetProviderInfo): View.OnTouchListener {
+        var dX = 0f
+        var dY = 0f
+        return View.OnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    dX = target.x - event.rawX
+                    dY = target.y - event.rawY
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val newX = (event.rawX + dX).toInt()
+                    val newY = (event.rawY + dY).toInt()
+                    target.x = newX.toFloat()
+                    target.y = newY.toFloat()
+                    updateWidgetPositionInPrefs(widgetId, provider.provider, newX, newY, target.width, target.height)
+                }
+            }
+            true
+        }
+    }
+
+    private fun resizeTouchListener(widgetView: View, widgetId: Int, provider: AppWidgetProviderInfo): View.OnTouchListener {
+        var initialX = 0
+        var initialY = 0
+        var initialWidth = 0
+        var initialHeight = 0
+        return View.OnTouchListener { _, event ->
+            val parent = widgetView.parent as? View ?: return@OnTouchListener false
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = event.rawX.toInt()
+                    initialY = event.rawY.toInt()
+                    initialWidth = parent.width
+                    initialHeight = parent.height
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val deltaX = event.rawX.toInt() - initialX
+                    val deltaY = event.rawY.toInt() - initialY
+                    val newWidth = (initialWidth + deltaX).coerceAtLeast(200)
+                    val newHeight = (initialHeight + deltaY).coerceAtLeast(200)
+
+                    val layoutParams = parent.layoutParams as? FrameLayout.LayoutParams ?: FrameLayout.LayoutParams(newWidth, newHeight)
+                    layoutParams.width = newWidth
+                    layoutParams.height = newHeight
+                    layoutParams.leftMargin = parent.x.toInt()
+                    layoutParams.topMargin = parent.y.toInt()
+                    parent.layoutParams = layoutParams
+
+                    widgetView.layoutParams = FrameLayout.LayoutParams(newWidth, newHeight)
+
+                    appWidgetManager.updateAppWidgetOptions(widgetId, Bundle().apply {
+                        putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, newWidth)
+                        putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, newWidth)
+                        putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, newHeight)
+                        putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, newHeight)
+                    })
+
+                    updateWidgetPositionInPrefs(widgetId, provider.provider, parent.x.toInt(), parent.y.toInt(), newWidth, newHeight)
+                }
+            }
+            true
+        }
+    }
+
+    private fun saveWidgetToPrefs(widgetId: Int, provider: ComponentName, x: Int, y: Int, w: Int, h: Int) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val json = prefs.getString(PREF_WIDGET_POSITIONS, "[]")
+        val arr = JSONArray(json)
+        arr.put(JSONObject().apply {
+            put("id", widgetId)
+            put("provider", provider.flattenToString())
+            put("x", x)
+            put("y", y)
+            put("w", w)
+            put("h", h)
+        })
+        prefs.edit().putString(PREF_WIDGET_POSITIONS, arr.toString()).apply()
+    }
+
+    private fun updateWidgetPositionInPrefs(widgetId: Int, provider: ComponentName, x: Int, y: Int, w: Int, h: Int) {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val json = prefs.getString(PREF_WIDGET_POSITIONS, "[]")
+        val arr = JSONArray(json)
+        val updated = JSONArray()
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            if (obj.getInt("id") == widgetId) continue
+            updated.put(obj)
+        }
+        updated.put(JSONObject().apply {
+            put("id", widgetId)
+            put("provider", provider.flattenToString())
+            put("x", x)
+            put("y", y)
+            put("w", w)
+            put("h", h)
+        })
+        prefs.edit().putString(PREF_WIDGET_POSITIONS, updated.toString()).apply()
+    }
+
+    private fun restoreWidgetsFromPrefs() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val json = prefs.getString(PREF_WIDGET_POSITIONS, "[]") ?: return
+        val arr = JSONArray(json)
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            val widgetId = obj.getInt("id")
+            val provider = ComponentName.unflattenFromString(obj.getString("provider")) ?: continue
+            val info = appWidgetManager.getAppWidgetInfo(widgetId) ?: continue
+            addWidgetToActivity(info, widgetId, obj.getInt("x"), obj.getInt("y"), obj.getInt("w"), obj.getInt("h"))
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 100 && resultCode == RESULT_OK) {
+            val widgetId = data?.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1) ?: -1
+            if (widgetId != -1) {
+                val provider = appWidgetManager.getAppWidgetInfo(widgetId)
+                provider?.let { addWidgetToActivity(it, widgetId) }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        appWidgetHost.stopListening()
+    }
+}
+
+
+
+
+
+
+
+
+
+
+package com.example.mynewwidget
+
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.content.Context
+import android.util.Log
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.recyclerview.widget.RecyclerView
+
+class WidgetPickerAdapter(
+    private val providers: List<AppWidgetProviderInfo>,
+    private val context: Context,
+    private val host: AppWidgetHost,
+    private val manager: AppWidgetManager,
+    private val onWidgetSelected: (AppWidgetProviderInfo, Int) -> Unit
+) : RecyclerView.Adapter<WidgetPickerAdapter.WidgetViewHolder>() {
+
+    private val allocatedWidgetIds = mutableListOf<Int>()
+
+    inner class WidgetViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val container: LinearLayout = view.findViewById(R.id.item_container)
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): WidgetViewHolder {
+        val view = LayoutInflater.from(parent.context).inflate(R.layout.item_widget_picker, parent, false)
+        return WidgetViewHolder(view)
+    }
+
+    override fun onBindViewHolder(holder: WidgetViewHolder, position: Int) {
+        val provider = providers[position]
+        val widgetId = host.allocateAppWidgetId()
+        allocatedWidgetIds.add(widgetId)
+
+        val bound = try {
+            manager.bindAppWidgetIdIfAllowed(widgetId, provider.provider)
+        } catch (e: Exception) {
+            false
+        }
+
+        holder.container.removeAllViews()
+
+        if (bound) {
+            try {
+                val hostView = host.createView(context, widgetId, provider).apply {
+                    setAppWidget(widgetId, provider)
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dpToPx(140)
+                    )
+                }
+                val label = TextView(context).apply {
+                    text = provider.label
+                    setPadding(0, 8, 0, 8)
+                    textAlignment = TextView.TEXT_ALIGNMENT_CENTER
+                }
+
+                holder.container.addView(label)
+                holder.container.addView(hostView)
+
+                holder.container.setOnClickListener {
+                    onWidgetSelected(provider, widgetId)
+                }
+
+            } catch (e: Exception) {
+                Log.e("WidgetPickerAdapter", "Failed to render widget preview", e)
+            }
+        }
+    }
+
+    override fun getItemCount(): Int = providers.size
+
+    fun cleanup() {
+        allocatedWidgetIds.forEach {
+            try {
+                host.deleteAppWidgetId(it)
+            } catch (_: Exception) {}
+        }
+        allocatedWidgetIds.clear()
+    }
+
+    private fun dpToPx(dp: Int): Int {
+        val density = context.resources.displayMetrics.density
+        return (dp * density).toInt()
+    }
+}
+
+
+
+
+item_widget_picker.xml
+
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/item_container"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="12dp"
+    android:orientation="vertical"
+    android:background="#f5f5f5"
+    android:layout_margin="8dp"
+    android:elevation="2dp"
+    android:gravity="center">
+</LinearLayout>
+
+
